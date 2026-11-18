@@ -197,6 +197,13 @@ def test_png_author_keyword_is_kept_as_artist():
     assert resolve_credit_tags(original, keep=["Artist"]) == {"Artist": "Lain Cashmere"}
 
 
+def test_seed_repeats_the_same_capture():
+    first, first_report = stamp_iphone_capture(_jpeg(), taken_at=TAKEN, seed=7)
+    second, second_report = stamp_iphone_capture(_jpeg(), taken_at=TAKEN, seed=7)
+    assert first == second
+    assert first_report["location"] == second_report["location"]
+
+
 def test_unknown_credit_tag_rejected():
     with pytest.raises(ValueError):
         resolve_credit_tags(b"", set_tags={"Software": "Lain Cashmere"})

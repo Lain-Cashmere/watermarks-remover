@@ -8,6 +8,7 @@ Sydney CBD, NSW, or no location at all.
 
 from __future__ import annotations
 
+import random
 import secrets
 import struct
 import subprocess
@@ -123,19 +124,23 @@ def stamp_iphone_capture(
     location: str | None = None,
     taken_at: datetime | None = None,
     tags: dict[str, str] | None = None,
+    seed: int | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Append iPhone 17 Pro Max EXIF to ``data``.
 
     ``location`` is ``Sydney CBD, NSW``, ``unknown``, or ``None`` to pick one
     of those two at random. ``tags`` may set Artist and Copyright on that
-    same EXIF. Returns the (possibly unchanged) bytes and a report describing
-    what was written.
+    same EXIF. ``seed`` makes the random location, shutter and ISO repeatable.
+    Returns the (possibly unchanged) bytes and a report describing what was
+    written.
     """
     credit = _validate_credit_values(tags or {})
-    chosen = _choose_location(location)
+    # Seeded only so one file stamps the same way on a rerun. Not a secret.
+    picker = random.Random(seed) if seed is not None else secrets  # noqa: S311
+    chosen = _choose_location(location, picker)
     when = _sydney_time(taken_at)
-    exposure = secrets.choice(_EXPOSURE_DENOMS)
-    iso = secrets.choice(_ISO_VALUES)
+    exposure = picker.choice(_EXPOSURE_DENOMS)
+    iso = picker.choice(_ISO_VALUES)
     fmt = detect_format(data)
     tiff = _build_tiff(
         when,
@@ -188,9 +193,9 @@ def read_stamped_capture(data: bytes) -> dict[str, Any] | None:
     return _read_tiff_capture(tiff)
 
 
-def _choose_location(location: str | None) -> str:
+def _choose_location(location: str | None, picker: Any) -> str:
     if location is None:
-        return secrets.choice(LOCATIONS)
+        return picker.choice(LOCATIONS)
     if location not in LOCATIONS:
         raise ValueError("location must be 'Sydney CBD, NSW' or 'unknown'")
     return location
