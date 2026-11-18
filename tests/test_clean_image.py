@@ -21,6 +21,8 @@ JPEG_1X1 = base64.b64decode(
 from image_meta import (
     clean_image,
     detect_format,
+    inspect_jpeg,
+    inspect_png,
     inspect_webp,
     strip_jpeg,
     strip_png,
@@ -259,6 +261,34 @@ def test_webp_c2pa_and_xmp_are_detected_and_removed(tmp_path: Path):
     assert result["format"] == "webp"
     assert not result["still_has_c2pa"]
     assert not result["still_has_ai_metadata"]
+
+
+def test_png_idat_chance_bytes_are_not_c2pa_markers():
+    """Cai: / jUMb inside compressed pixels lowercases to cai: / jumb."""
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    picture = _png_chunk(b"IDAT", b"xxCai:yyjUMbzz")
+    data = sig + _png_chunk(b"IHDR", ihdr) + picture + _png_chunk(b"IEND", b"")
+    has_c2pa, has_ai, findings = inspect_png(data)
+    assert not has_c2pa and not has_ai
+    assert findings == []
+
+    hidden = _png_chunk(b"prIV", b"cai: manifest")
+    marked = sig + _png_chunk(b"IHDR", ihdr) + picture + hidden + _png_chunk(b"IEND", b"")
+    has_c2pa, _has_ai, findings = inspect_png(marked)
+    assert has_c2pa
+    assert any("cai:" in finding for finding in findings)
+
+
+def test_jpeg_scan_data_chance_bytes_are_not_c2pa_markers():
+    sos = JPEG_1X1.find(b"\xff\xda")
+    assert sos > 0
+    seglen = struct.unpack(">H", JPEG_1X1[sos + 2 : sos + 4])[0]
+    entropy = sos + 2 + seglen
+    data = JPEG_1X1[:entropy] + b"Cai:jUMb" + JPEG_1X1[entropy:]
+    has_c2pa, has_ai, findings = inspect_jpeg(data)
+    assert not has_c2pa and not has_ai
+    assert not any("byte-scan" in finding for finding in findings)
 
 
 def test_webp_image_payload_text_is_not_a_metadata_false_positive():

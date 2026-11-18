@@ -379,6 +379,9 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
     has_ai = False
     if not data.startswith(PNG_SIG):
         return False, False, ["not a PNG"]
+    # Fallback scan input. IDAT payloads are the compressed picture, so a
+    # chance sequence there (Cai:, jUMb) is not a metadata marker.
+    metadata = bytearray()
     pos = 8
     while pos + 8 <= len(data):
         length = struct.unpack(">I", data[pos : pos + 4])[0]
@@ -387,8 +390,11 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
         chunk_end = chunk_start + length
         if chunk_end + 4 > len(data):
             findings.append(f"truncated chunk {ctype!r}")
+            metadata.extend(data[pos:])
             break
         payload = data[chunk_start:chunk_end]
+        if ctype != b"IDAT":
+            metadata.extend(payload)
         name = ctype.decode("latin-1", errors="replace")
         # Private/ancillary chunks sometimes used for JUMBF/C2PA
         if ctype in (b"caBX", b"juMB", b"jumb") or ctype.startswith(b"c2"):
@@ -415,10 +421,14 @@ def inspect_png(data: bytes) -> tuple[bool, bool, list[str]]:
                     parts.append(f"AI generator ({', '.join(product_hits[:8])})")
                 findings.append(f"PNG {name}: {'; '.join(parts)}")
         if ctype == b"IEND":
+            metadata.extend(data[chunk_end + 4 :])
             break
         pos = chunk_end + 4  # skip CRC
-    # Whole-file scan fallback
-    whole = _contains_any(data, C2PA_MARKERS)
+    else:
+        metadata.extend(data[pos:])
+    # Markers outside the compressed picture: other chunks, a truncated tail, or
+    # bytes after IEND. Named C2PA chunks are already recorded above.
+    whole = _contains_any(bytes(metadata), C2PA_MARKERS)
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
@@ -433,6 +443,7 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
         return False, False, ["not a JPEG"]
     i = 2
     n = len(data)
+    entropy_at: int | None = None
     while i + 4 <= n:
         if data[i] != 0xFF:
             i += 1
@@ -446,7 +457,11 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
         i += 1
         if marker in (0xD8, 0xD9):  # SOI/EOI
             continue
-        if marker == 0xDA:  # SOS — image data follows
+        if marker == 0xDA:  # SOS — compressed picture follows the header
+            if i + 2 <= n:
+                seglen = struct.unpack(">H", data[i : i + 2])[0]
+                if 2 <= seglen <= n - i:
+                    entropy_at = i + seglen
             break
         if marker >= 0xD0 and marker <= 0xD7:  # RSTn
             continue
@@ -482,7 +497,27 @@ def inspect_jpeg(data: bytes) -> tuple[bool, bool, list[str]]:
                     has_c2pa = True
                 findings.append(f"JPEG APP{marker - 0xE0}: {', '.join(hits[:8])}")
 
-    whole = _contains_any(data, JPEG_C2PA_MARKERS)
+    # Skip the entropy-coded scan. A chance Cai: in the picture is not metadata.
+    # APP segments were inspected above; keep anything after EOI.
+    if entropy_at is None:
+        scanned = data
+    else:
+        tail = b""
+        j = entropy_at
+        while j + 1 < n:
+            if data[j] != 0xFF:
+                j += 1
+                continue
+            nxt = data[j + 1]
+            if nxt == 0x00:  # stuffed 0xFF inside the scan
+                j += 2
+                continue
+            if nxt == 0xD9:  # EOI
+                tail = data[j:]
+                break
+            j += 2
+        scanned = data[:entropy_at] + tail
+    whole = _contains_any(scanned, JPEG_C2PA_MARKERS)
     if whole and not has_c2pa:
         has_c2pa = True
         findings.append(f"byte-scan C2PA markers: {', '.join(whole[:6])}")
