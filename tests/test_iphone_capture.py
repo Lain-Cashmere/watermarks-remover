@@ -209,6 +209,65 @@ def test_unknown_credit_tag_rejected():
         resolve_credit_tags(b"", set_tags={"Software": "Lain Cashmere"})
 
 
+def test_clean_image_cli_fills_missing_credit_and_repeats_the_seed(tmp_path, monkeypatch):
+    src = tmp_path / "shot.png"
+    src.write_bytes(_png())
+    taken = "2026-10-27T20:40:15+11:00"
+    outs = []
+    for name in ("a.png", "b.png"):
+        dest = tmp_path / name
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "clean_image.py",
+                str(src),
+                "-o",
+                str(dest),
+                "--fill-credit",
+                "Lain Cashmere",
+                "--seed",
+                "7",
+                "--taken-at",
+                taken,
+            ],
+        )
+        assert clean_image.main() == 0
+        outs.append(dest.read_bytes())
+    assert outs[0] == outs[1]
+    assert read_credit_tags(outs[0]) == {
+        "Artist": "Lain Cashmere",
+        "Copyright": "Lain Cashmere",
+    }
+
+
+def test_clean_image_cli_fill_credit_keeps_an_existing_value(tmp_path, monkeypatch):
+    src = tmp_path / "shot.png"
+    src.write_bytes(_png_with_credit(artist="Old Name", copyright_="Kept"))
+    dest = tmp_path / "shot.cleaned.png"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "clean_image.py",
+            str(src),
+            "-o",
+            str(dest),
+            "--fill-credit",
+            "Lain Cashmere",
+            "--seed",
+            "1",
+            "--taken-at",
+            "2026-10-27T20:40:15+11:00",
+        ],
+    )
+    assert clean_image.main() == 0
+    assert read_credit_tags(dest.read_bytes()) == {
+        "Artist": "Old Name",
+        "Copyright": "Kept",
+    }
+
+
 def test_clean_image_cli_keeps_and_sets_credit(tmp_path, monkeypatch):
     src = tmp_path / "shot.png"
     src.write_bytes(_png_with_credit())

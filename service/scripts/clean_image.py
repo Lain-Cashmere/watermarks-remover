@@ -11,13 +11,19 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import backup_path, cleaned_path, eprint
 from image_meta import clean_image
-from iphone_capture import CREDIT_TAGS, resolve_credit_tags, stamp_iphone_capture
+from iphone_capture import (
+    CREDIT_TAGS,
+    _validate_credit_values,
+    resolve_credit_tags,
+    stamp_iphone_capture,
+)
 
 
 def _cli_tags(items: list[str]) -> dict[str, str]:
@@ -30,17 +36,31 @@ def _cli_tags(items: list[str]) -> dict[str, str]:
     return tags
 
 
+def _parse_taken_at(value: str) -> datetime:
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"taken-at must be an ISO-8601 time, got {value!r}") from exc
+    if when.tzinfo is None:
+        raise ValueError("taken-at needs a timezone offset")
+    return when
+
+
 def _apply_capture_stamp(
     dest: Path,
     src: Path,
     result: dict,
     *,
     tags: dict[str, str] | None = None,
+    seed: int | None = None,
+    taken_at: datetime | None = None,
 ) -> None:
     """Write the same iPhone capture tags /clean appends, after the strip."""
     if not dest.is_file():
         return
-    stamped, capture = stamp_iphone_capture(dest.read_bytes(), tags=tags)
+    stamped, capture = stamp_iphone_capture(
+        dest.read_bytes(), tags=tags, seed=seed, taken_at=taken_at
+    )
     if capture["written"]:
         dest.write_bytes(stamped)
     result.setdefault("actions", []).append(capture["action"])
@@ -90,6 +110,22 @@ def main() -> int:
         metavar="NAME=VALUE",
         help="Set Artist or Copyright, overriding --keep-tag. "
         "Example: --tag 'Copyright=Lain Cashmere'",
+    )
+    p.add_argument(
+        "--fill-credit",
+        default=None,
+        help="Keep Artist and Copyright, and set either missing one to this text",
+    )
+    p.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Repeat the same location, shutter and ISO when this number is the same",
+    )
+    p.add_argument(
+        "--taken-at",
+        default=None,
+        help="Capture time as ISO-8601 with a timezone offset",
     )
     p.add_argument("--json", action="store_true", help="JSON result on stdout")
     p.add_argument(
@@ -203,11 +239,21 @@ def main() -> int:
         dest = args.output or cleaned_path(args.path)
 
     try:
+        keep = list(args.keep_tag)
+        if args.fill_credit is not None:
+            for name in CREDIT_TAGS:
+                if name not in keep:
+                    keep.append(name)
         credit_tags = resolve_credit_tags(
             src.read_bytes(),
-            keep=args.keep_tag,
+            keep=keep,
             set_tags=_cli_tags(args.tag),
         )
+        if args.fill_credit is not None:
+            fill = _validate_credit_values({"Artist": args.fill_credit})["Artist"]
+            for name in CREDIT_TAGS:
+                credit_tags.setdefault(name, fill)
+        taken_at = _parse_taken_at(args.taken_at) if args.taken_at else None
     except ValueError as exc:
         eprint(f"error: {exc}")
         return 2
@@ -233,7 +279,9 @@ def main() -> int:
             markdiffusion_device=args.markdiffusion_device,
             markdiffusion_timeout=args.markdiffusion_timeout,
         )
-        _apply_capture_stamp(dest, src, result, tags=credit_tags)
+        _apply_capture_stamp(
+            dest, src, result, tags=credit_tags, seed=args.seed, taken_at=taken_at
+        )
     except Exception as e:
         eprint(f"error: {e}")
         return 1
