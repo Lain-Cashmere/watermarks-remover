@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Strip C2PA and AI-related metadata from raster images (PNG/JPEG/WebP/AVIF/HEIC/BMP/GIF/TIFF)."""
+"""Strip C2PA and AI-related metadata, then stamp iPhone 17 Pro Max capture metadata.
+
+JPEG, PNG, and WebP are stamped in-process. HEIC, AVIF, and TIFF are stamped
+when exiftool is installed. The location is Sydney CBD, NSW or unknown.
+"""
 
 from __future__ import annotations
 
@@ -12,6 +16,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import backup_path, cleaned_path, eprint
 from image_meta import clean_image
+from iphone_capture import stamp_iphone_capture
+
+
+def _apply_capture_stamp(dest: Path, src: Path, result: dict) -> None:
+    """Write the same iPhone capture tags /clean appends, after the strip."""
+    if not dest.is_file():
+        return
+    stamped, capture = stamp_iphone_capture(dest.read_bytes())
+    if capture["written"]:
+        dest.write_bytes(stamped)
+    result.setdefault("actions", []).append(capture["action"])
+    result["capture"] = {
+        "written": capture["written"],
+        "make": capture["make"],
+        "model": capture["model"],
+        "software": capture["software"],
+        "location": capture["location"],
+        "taken_at": capture["taken_at"],
+    }
+    result["bytes_out"] = dest.stat().st_size
+    # In-place with an existing backup reads and writes the same path, so the
+    # pre-stamp `changed` flag is the one that still knows the original bytes.
+    if src.resolve() != dest.resolve():
+        result["changed"] = dest.read_bytes() != src.read_bytes()
+    elif capture["written"]:
+        result["changed"] = True
 
 
 def main() -> int:
@@ -160,6 +190,7 @@ def main() -> int:
             markdiffusion_device=args.markdiffusion_device,
             markdiffusion_timeout=args.markdiffusion_timeout,
         )
+        _apply_capture_stamp(dest, src, result)
     except Exception as e:
         eprint(f"error: {e}")
         return 1

@@ -75,6 +75,8 @@ def test_bundle_cleans_an_image_without_the_repo(tmp_path):
     data = cleaned.read_bytes()
     assert b"caBX" not in data
     assert b"IDAT" in data
+    assert b"iPhone 17 Pro Max" in data
+    assert b"Apple" in data
 
 
 def test_bundle_leaves_other_files_in_dest_alone(tmp_path):

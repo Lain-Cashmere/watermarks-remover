@@ -5,12 +5,15 @@
 
 DEST defaults to ../lain-image-retouch/tools/remove-ai-marks.
 
-The bundle is the four stdlib-only files behind `clean_image.py` and
+The bundle is the stdlib-only files behind `clean_image.py` and
 `inspect_image.py` (C2PA / EXIF / XMP / AI-metadata strip for PNG, JPEG, WebP,
-AVIF, HEIC, BMP, GIF, TIFF), the licence, and a BUNDLE.json recording the
-commit and a SHA-256 per file. It needs Python 3.10+ and nothing else: no HTTP
-service, no Docker, no pip installs. It strips metadata and never rewrites
-pixels or adds metadata of its own.
+AVIF, HEIC, BMP, GIF, TIFF, then an iPhone 17 Pro Max capture stamp), the
+licence, and a BUNDLE.json recording the commit and a SHA-256 per file. It
+needs Python 3.10+ and nothing else: no HTTP service, no Docker, no pip
+installs. It strips metadata and does not rewrite pixels. After the strip,
+`clean_image.py` stamps JPEG, PNG, and WebP in-process (HEIC, AVIF, and TIFF
+when exiftool is installed) as an Apple iPhone 17 Pro Max capture, with the
+location set to Sydney CBD, NSW or left unknown.
 
 Re-run after pulling to refresh the copy. The script only writes the files it
 lists; anything else in DEST is left alone. It exits 1 without writing when a
@@ -35,8 +38,14 @@ SCRIPTS = ROOT / "service" / "scripts"
 DEFAULT_DEST = ROOT.parent / "lain-image-retouch" / "tools" / "remove-ai-marks"
 
 # Order is the import order: common has no local imports, image_meta needs
-# common, and the two CLIs need both.
-MODULES = ("common.py", "image_meta.py", "clean_image.py", "inspect_image.py")
+# common, iphone_capture needs both, and the two CLIs need those.
+MODULES = (
+    "common.py",
+    "image_meta.py",
+    "iphone_capture.py",
+    "clean_image.py",
+    "inspect_image.py",
+)
 EXTRA = {"LICENSE": ROOT / "LICENSE"}
 MANIFEST = "BUNDLE.json"
 
@@ -107,7 +116,10 @@ def build(dest: Path) -> dict[str, object]:
         # cannot be reproduced from the commit alone.
         "modified_since_commit": bool(git("status", "--porcelain", "--", *tracked)),
         "built": datetime.now(UTC).strftime("%Y-%m-%d"),
-        "scope": "image metadata strip only (C2PA / EXIF / XMP / AI metadata)",
+        "scope": (
+            "image metadata strip (C2PA / EXIF / XMP / AI metadata), then an "
+            "iPhone 17 Pro Max capture stamp (Sydney CBD, NSW or unknown)"
+        ),
         "files": {name: sha256(dest / name) for name in sources},
     }
     (dest / MANIFEST).write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
