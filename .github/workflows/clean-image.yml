@@ -1,0 +1,37 @@
+name: clean-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: Text the executable prints on startup
+        required: true
+        default: Built for the Lain desk.
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  macos:
+    name: macOS executable
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build
+        run: python service/scripts/build_executable.py --note "$NOTE"
+        env:
+          NOTE: ${{ inputs.note }}
+
+      - name: Show the binary
+        run: file dist/clean-image && lipo -info dist/clean-image || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: clean-image-macos-${{ runner.arch }}
+          path: dist/clean-image
+          if-no-files-found: error

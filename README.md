@@ -1213,6 +1213,35 @@ repos:
 
 `watermarks-remover-check` fails the commit and lists findings; `watermarks-remover-clean` is opt-in and rewrites staged files in place (exits 1 so you review the diff and re-stage — the same convention as auto-fixing hooks like `ruff --fix`). When the cleaner cannot process a file at all — it crashed, was killed, or produced no report — `watermarks-remover-clean` names that file and exits 3 instead, so a cleaner that failed is never mistaken for an already-clean file. Run either by hand with `python3 service/scripts/check_staged.py <files...>` / `clean_staged.py <files...>`.
 
+## Build clean-image
+
+`clean-image` is the one-file image cleaner. PyInstaller builds only for the
+operating system it is running on, so build the Linux file on Linux and the
+Mac file on a Mac. The script creates `dist/pyinstaller-venv` and installs
+PyInstaller there when the command is not already available.
+
+```bash
+python3 service/scripts/build_executable.py --note "Built for the Lain desk."
+```
+
+That writes `dist/clean-image` (`clean-image.exe` on Windows). The note is
+printed on stderr every time the executable starts. The MIT `LICENSE` is
+packed in with it.
+
+The same command on a Mac produces the Mac executable. From GitHub, run
+**Actions → clean-image → Run workflow** and download
+`clean-image-macos-arm64`.
+
+## Publish this line
+
+This line is forked from `5c18093`,
+`fix(container): parse HTML meta attributes without a backtracking regex (#407)`.
+Publish `main` to Lain Cashmere:
+
+```bash
+git push git@github.com:Lain-Cashmere/watermarks-remover.git HEAD:main
+```
+
 ## Tests
 
 ```bash

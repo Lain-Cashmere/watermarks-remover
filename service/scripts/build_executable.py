@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Build a one-file clean-image executable for this operating system.
 
-PyInstaller only builds for the OS it is running on, so produce the Mac,
-Windows, and Linux files on those systems (or in a CI job for each one).
+PyInstaller only builds for the OS it is running on. This Linux machine
+produces the Linux file. The Mac file is built by the ``clean-image``
+GitHub Actions workflow, which runs on a Mac and uploads ``dist/clean-image``.
 The MIT license is bundled next to the note. ``--note`` is printed to stderr
 every time the executable starts.
 
