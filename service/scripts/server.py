@@ -78,7 +78,7 @@ from container_meta import (
 )
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
-from iphone_capture import stamp_iphone_capture
+from iphone_capture import resolve_credit_tags, stamp_iphone_capture
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -118,6 +118,8 @@ ALLOWED_CLEAN_OPTIONS = {
     "clean_attachments": str,
     "style": str,
     "strategy": str,
+    "keep_tags": list,
+    "tags": dict,
 }
 
 # Default Layer B strategy loaded from the strategy config file (overridable by
@@ -354,6 +356,20 @@ def _clean_request_schema() -> dict[str, Any]:
     for key, kind in ALLOWED_CLEAN_OPTIONS.items():
         if kind is bool:
             options[key] = _schema(type="boolean")
+        elif kind is list:
+            options[key] = _schema(
+                type="array",
+                items=_schema(type="string"),
+                description="Credit tags to copy from the input: Artist, Copyright",
+            )
+        elif kind is dict:
+            options[key] = _schema(
+                type="object",
+                additionalProperties=_schema(type="string"),
+                description=(
+                    "Credit tags to write, overriding keep_tags. Keys are Artist and Copyright"
+                ),
+            )
         else:
             options[key] = _schema(type="string")
     return _file_request(
@@ -911,6 +927,28 @@ def _decode_input(body: dict[str, Any]) -> tuple[bytes, str]:
     return data, _safe_name(name or "")
 
 
+def _expect_option(key: str, value: Any, expected: type) -> None:
+    if expected is bool:
+        if not isinstance(value, bool):
+            raise ValueError(f"option {key!r} must be a boolean")
+        return
+    if expected is str:
+        if not isinstance(value, str):
+            raise ValueError(f"option {key!r} must be a string")
+        return
+    if expected is list:
+        if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+            raise ValueError(f"option {key!r} must be an array of strings")
+        return
+    if expected is dict:
+        if not isinstance(value, dict) or not all(
+            isinstance(name, str) and isinstance(item, str) for name, item in value.items()
+        ):
+            raise ValueError(f"option {key!r} must be an object of strings")
+        return
+    raise ValueError(f"option {key!r} must be a string")
+
+
 def _parse_clean_options(options: Any) -> dict[str, Any]:
     if options is None:
         return {}
@@ -919,10 +957,13 @@ def _parse_clean_options(options: Any) -> dict[str, Any]:
     for key, value in options.items():
         if key not in ALLOWED_CLEAN_OPTIONS:
             raise ValueError(f"unknown option: {key}")
-        expected_type = ALLOWED_CLEAN_OPTIONS[key]
-        if not isinstance(value, expected_type):
-            type_name = "boolean" if expected_type is bool else "string"
-            raise ValueError(f"option {key!r} must be a {type_name}")
+        _expect_option(key, value, ALLOWED_CLEAN_OPTIONS[key])
+    if "keep_tags" in options or "tags" in options:
+        resolve_credit_tags(
+            b"",
+            keep=options.get("keep_tags"),
+            set_tags=options.get("tags"),
+        )
     # An unrecognised deep_images value used to fall back to "auto", which turns
     # a request for lossless cleaning into one that may recompress. Reject it
     # here, where every caller -- single file and batch alike -- passes through.
@@ -1296,8 +1337,14 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                 remove_pixel=remove_pixel,
             )
             # Stamp after the strip (and any pixel pass) so the capture tags
-            # are the metadata that leaves /clean.
-            stamped, capture = stamp_iphone_capture(dest.read_bytes())
+            # are the metadata that leaves /clean. Credit tags are read from
+            # the original bytes, because the strip has already removed them.
+            credit = resolve_credit_tags(
+                data,
+                keep=options.get("keep_tags"),
+                set_tags=options.get("tags"),
+            )
+            stamped, capture = stamp_iphone_capture(dest.read_bytes(), tags=credit)
             if capture["written"]:
                 dest.write_bytes(stamped)
             result["actions"].append(capture["action"])
@@ -1308,6 +1355,7 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                 "software": capture["software"],
                 "location": capture["location"],
                 "taken_at": capture["taken_at"],
+                "tags": capture["tags"],
             }
             result["bytes_out"] = dest.stat().st_size
             result["changed"] = dest.read_bytes() != data

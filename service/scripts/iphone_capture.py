@@ -24,7 +24,7 @@ from common import (
     subprocess_preexec_fn,
     which,
 )
-from image_meta import _webp_chunks, detect_format
+from image_meta import PngTextBudgetExceeded, _png_text_entries, _webp_chunks, detect_format
 
 MAKE = "Apple"
 MODEL = "iPhone 17 Pro Max"
@@ -69,19 +69,69 @@ _ISO_VALUES = (32, 40, 50, 64, 80, 100, 125, 160, 200, 250)
 
 _EXIFTOOL_SUFFIX = {"heic": ".heic", "avif": ".avif", "tiff": ".tif"}
 
+# Ownership tags the strip would otherwise drop. Only these two can be kept
+# or set, so a caller cannot write provenance or camera tags back.
+CREDIT_TAGS = {"Artist": 0x013B, "Copyright": 0x8298}
+_MAX_CREDIT_LEN = 512
+# PNG's standard author keyword is "Author"; treat it as Artist when the
+# file has no Artist tag of its own.
+_PNG_CREDIT_KEYS = {"artist": "Artist", "author": "Artist", "copyright": "Copyright"}
+
+
+def resolve_credit_tags(
+    data: bytes,
+    *,
+    keep: list[str] | None = None,
+    set_tags: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Merge tags copied from ``data`` with tags the caller sets.
+
+    ``keep`` names tags to copy when the file already has them. ``set_tags``
+    writes those values, including when the file had none, and overrides a
+    kept value of the same name. Names other than Artist and Copyright are
+    rejected. The result is ordered Artist, then Copyright.
+    """
+    kept_names = _validate_credit_names(keep or [])
+    explicit = _validate_credit_values(set_tags or {})
+    present = read_credit_tags(data) if kept_names else {}
+    merged = {name: present[name] for name in kept_names if present.get(name)}
+    merged.update(explicit)
+    return {name: merged[name] for name in CREDIT_TAGS if name in merged}
+
+
+def read_credit_tags(data: bytes) -> dict[str, str]:
+    """Return Artist and Copyright found in EXIF or PNG text."""
+    fmt = detect_format(data)
+    found: dict[str, str] = {}
+    tiff: bytes | None = None
+    if fmt == "png":
+        found.update(_png_credit_text(data))
+        tiff = _png_exif(data)
+    elif fmt == "jpeg":
+        tiff = _jpeg_exif(data)
+    elif fmt == "webp":
+        tiff = _webp_exif(data)
+    if tiff:
+        # EXIF is the capture container we write, so it wins over PNG text.
+        found.update(_tiff_credit_tags(tiff))
+    return {name: found[name] for name in CREDIT_TAGS if found.get(name)}
+
 
 def stamp_iphone_capture(
     data: bytes,
     *,
     location: str | None = None,
     taken_at: datetime | None = None,
+    tags: dict[str, str] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Append iPhone 17 Pro Max EXIF to ``data``.
 
     ``location`` is ``Sydney CBD, NSW``, ``unknown``, or ``None`` to pick one
-    of those two at random. Returns the (possibly unchanged) bytes and a
-    report describing what was written.
+    of those two at random. ``tags`` may set Artist and Copyright on that
+    same EXIF. Returns the (possibly unchanged) bytes and a report describing
+    what was written.
     """
+    credit = _validate_credit_values(tags or {})
     chosen = _choose_location(location)
     when = _sydney_time(taken_at)
     exposure = secrets.choice(_EXPOSURE_DENOMS)
@@ -93,20 +143,28 @@ def stamp_iphone_capture(
         size=_image_size(fmt, data),
         exposure_denom=exposure,
         iso=iso,
+        tags=credit,
     )
-    stamped = _embed(fmt, data, tiff, when, chosen)
+    stamped = _embed(fmt, data, tiff, when, chosen, credit)
     written = stamped is not None
     where = chosen if chosen == SYDNEY_CBD else "unknown"
+    written_tags = credit if written else {}
     if written:
         action = f"appended capture metadata: {MAKE} {MODEL}, location {where}"
+        if written_tags:
+            shown = ", ".join(f"{name}={value}" for name, value in written_tags.items())
+            action = f"{action}, credit {shown}"
         out = stamped
     else:
         action = f"capture metadata skipped ({fmt})"
+        if credit:
+            action = f"{action}; credit tags not written"
         out = data
     return out, {
         "written": written,
         "make": MAKE,
         "model": MODEL,
+        "tags": written_tags,
         "software": SOFTWARE,
         "location": chosen,
         "taken_at": when.isoformat(timespec="seconds"),
@@ -171,6 +229,11 @@ def _ascii(value: str) -> tuple[int, int, bytes]:
     return _TYPE_ASCII, len(raw), raw
 
 
+def _text(value: str) -> tuple[int, int, bytes]:
+    raw = value.encode("utf-8") + b"\x00"
+    return _TYPE_ASCII, len(raw), raw
+
+
 def _short(value: int) -> tuple[int, int, bytes]:
     return _TYPE_SHORT, 1, struct.pack(">H", value)
 
@@ -196,6 +259,35 @@ def _byte(raw: bytes) -> tuple[int, int, bytes]:
     return _TYPE_BYTE, len(raw), raw
 
 
+def _validate_credit_names(names: list[str]) -> list[str]:
+    unknown = [name for name in names if name not in CREDIT_TAGS]
+    if unknown:
+        allowed = ", ".join(CREDIT_TAGS)
+        raise ValueError(f"credit tags must be one of {allowed}; got {', '.join(unknown)}")
+    ordered: list[str] = []
+    for name in names:
+        if name not in ordered:
+            ordered.append(name)
+    return ordered
+
+
+def _validate_credit_values(tags: dict[str, str]) -> dict[str, str]:
+    cleaned: dict[str, str] = {}
+    for name, value in tags.items():
+        if name not in CREDIT_TAGS:
+            allowed = ", ".join(CREDIT_TAGS)
+            raise ValueError(f"credit tags must be one of {allowed}; got {name}")
+        if not isinstance(value, str):
+            raise ValueError(f"credit tag {name} must be a string")
+        text = value.strip()
+        if not text or len(text) > _MAX_CREDIT_LEN or any(ord(char) < 32 for char in text):
+            raise ValueError(
+                f"credit tag {name} must be a single line of at most {_MAX_CREDIT_LEN} characters"
+            )
+        cleaned[name] = text
+    return {name: cleaned[name] for name in CREDIT_TAGS if name in cleaned}
+
+
 def _build_tiff(
     when: datetime,
     *,
@@ -203,6 +295,7 @@ def _build_tiff(
     size: tuple[int, int] | None,
     exposure_denom: int,
     iso: int,
+    tags: dict[str, str] | None = None,
 ) -> bytes:
     taken = when.strftime("%Y:%m:%d %H:%M:%S")
     subsec = f"{when.microsecond // 1000:03d}"
@@ -221,6 +314,8 @@ def _build_tiff(
         (0x013C, *_ascii(HOST_COMPUTER)),
         (0x0213, *_short(1)),
     ]
+    for name, value in (tags or {}).items():
+        ifd0.append((CREDIT_TAGS[name], *_text(value)))
     exif: list[tuple[int, int, int, bytes]] = [
         (0x829A, *_rational(1, exposure_denom)),
         (0x829D, *_rational(*FNUMBER)),
@@ -430,6 +525,7 @@ def _embed(
     tiff: bytes,
     when: datetime,
     location: str,
+    tags: dict[str, str],
 ) -> bytes | None:
     if fmt == "jpeg":
         return _embed_jpeg(data, tiff)
@@ -438,7 +534,7 @@ def _embed(
     if fmt == "webp":
         return _embed_webp(data, tiff)
     if fmt in _EXIFTOOL_SUFFIX:
-        return _embed_exiftool(data, _EXIFTOOL_SUFFIX[fmt], when, location)
+        return _embed_exiftool(data, _EXIFTOOL_SUFFIX[fmt], when, location, tags)
     return None
 
 
@@ -575,7 +671,13 @@ def _embed_webp(data: bytes, tiff: bytes) -> bytes | None:
     return b"RIFF" + struct.pack("<I", len(body)) + bytes(body)
 
 
-def _embed_exiftool(data: bytes, suffix: str, when: datetime, location: str) -> bytes | None:
+def _embed_exiftool(
+    data: bytes,
+    suffix: str,
+    when: datetime,
+    location: str,
+    tags: dict[str, str],
+) -> bytes | None:
     exiftool = which("exiftool")
     if not exiftool:
         return None
@@ -596,6 +698,8 @@ def _embed_exiftool(data: bytes, suffix: str, when: datetime, location: str) -> 
         "-FNumber=1.8",
         "-FocalLengthIn35mmFormat=24",
     ]
+    for name, value in tags.items():
+        args.append(f"-{name}={value}")
     if location == SYDNEY_CBD:
         args.extend(
             [
@@ -635,6 +739,66 @@ def _embed_exiftool(data: bytes, suffix: str, when: datetime, location: str) -> 
     if MODEL.encode("ascii") not in stamped:
         return None
     return stamped
+
+
+def _text_tag(raw: bytes | None) -> str:
+    if not raw:
+        return ""
+    return raw.split(b"\x00", 1)[0].decode("utf-8", errors="replace").strip()
+
+
+def _tiff_credit_tags(tiff: bytes) -> dict[str, str]:
+    if len(tiff) < 8 or tiff[:2] not in (b"MM", b"II"):
+        return {}
+    endian = ">" if tiff[:2] == b"MM" else "<"
+    if struct.unpack_from(endian + "H", tiff, 2)[0] != 42:
+        return {}
+    ifd0_off = struct.unpack_from(endian + "I", tiff, 4)[0]
+    try:
+        ifd0 = _read_ifd(tiff, ifd0_off, endian)
+    except (struct.error, IndexError, KeyError):
+        return {}
+    found: dict[str, str] = {}
+    for name, tag in CREDIT_TAGS.items():
+        text = _text_tag(ifd0.get(tag))
+        if text:
+            found[name] = text
+    return found
+
+
+def _png_credit_text(data: bytes) -> dict[str, str]:
+    if not data.startswith(_PNG_SIG):
+        return {}
+    author = ""
+    found: dict[str, str] = {}
+    pos = 8
+    while pos + 12 <= len(data):
+        length = struct.unpack(">I", data[pos : pos + 4])[0]
+        ctype = data[pos + 4 : pos + 8]
+        end = pos + 8 + length
+        if end + 4 > len(data):
+            break
+        payload = data[pos + 8 : end]
+        pos = end + 4
+        if ctype in (b"tEXt", b"zTXt", b"iTXt"):
+            try:
+                entries = _png_text_entries(payload, ctype)
+            except PngTextBudgetExceeded:
+                entries = []
+            for key, value in entries:
+                canon = _PNG_CREDIT_KEYS.get(key.strip().lower())
+                text = value.strip()
+                if not canon or not text or any(ord(char) < 32 for char in text):
+                    continue
+                if key.strip().lower() == "author":
+                    author = text
+                else:
+                    found[canon] = text
+        if ctype == b"IEND":
+            break
+    if "Artist" not in found and author:
+        found["Artist"] = author
+    return found
 
 
 def _jpeg_exif(data: bytes) -> bytes | None:

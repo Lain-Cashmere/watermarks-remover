@@ -202,6 +202,21 @@ def test_clean_text_accepts_style_option(conn):
     assert body["report"]["stats"]["removed_count"] == 2
 
 
+def _png_with_credit() -> bytes:
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00")
+    return (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"tEXt", b"Artist\x00Lain Cashmere")
+        + _png_chunk(b"tEXt", b"Copyright\x00Lain Cashmere")
+        + _png_chunk(b"tEXt", b"Comment\x00c2pa test contentcredentials")
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 def test_clean_png_strips_metadata(conn):
     data = _watermarked_png()
     status, body = _post(conn, "/clean", {"file": _b64(data), "name": "shot.png"})
@@ -222,6 +237,65 @@ def test_clean_png_strips_metadata(conn):
     assert stamped["make"] == "Apple"
     assert stamped["model"] == "iPhone 17 Pro Max"
     assert stamped["location"] == capture["location"]
+    assert capture["tags"] == {}
+
+
+def test_clean_keeps_credit_tags(conn):
+    status, body = _post(
+        conn,
+        "/clean",
+        {
+            "file": _b64(_png_with_credit()),
+            "name": "shot.png",
+            "options": {"keep_tags": ["Artist", "Copyright"]},
+        },
+    )
+    assert status == 200
+    cleaned = base64.b64decode(body["cleaned"])
+    assert b"c2pa" not in cleaned.lower()
+    assert iphone_capture.read_credit_tags(cleaned) == {
+        "Artist": "Lain Cashmere",
+        "Copyright": "Lain Cashmere",
+    }
+    assert body["report"]["capture"]["tags"] == {
+        "Artist": "Lain Cashmere",
+        "Copyright": "Lain Cashmere",
+    }
+
+
+def test_clean_adds_credit_tags_over_a_kept_value(conn):
+    status, body = _post(
+        conn,
+        "/clean",
+        {
+            "file": _b64(_png_with_credit()),
+            "name": "shot.png",
+            "options": {
+                "keep_tags": ["Artist"],
+                "tags": {"Copyright": "Lain Cashmere Studio"},
+            },
+        },
+    )
+    assert status == 200
+    cleaned = base64.b64decode(body["cleaned"])
+    assert iphone_capture.read_credit_tags(cleaned) == {
+        "Artist": "Lain Cashmere",
+        "Copyright": "Lain Cashmere Studio",
+    }
+
+
+def test_clean_rejects_unknown_credit_tag(conn):
+    status, body = _post(
+        conn,
+        "/clean",
+        {
+            "file": _b64(b"plain\n"),
+            "name": "note.txt",
+            "options": {"tags": {"Software": "Lain Cashmere"}},
+        },
+    )
+    assert status == 400
+    assert "Artist" in body["error"]
 
 
 def test_clean_markdown_container(conn):

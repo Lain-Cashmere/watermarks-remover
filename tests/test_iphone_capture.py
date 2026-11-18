@@ -14,13 +14,16 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "service" / "scripts"))
 
+import clean_image
 from iphone_capture import (
     MODEL,
     SYDNEY_CBD,
     SYDNEY_LAT_DMS,
     SYDNEY_LON_DMS,
     UNKNOWN,
+    read_credit_tags,
     read_stamped_capture,
+    resolve_credit_tags,
     stamp_iphone_capture,
 )
 
@@ -131,3 +134,93 @@ def test_gif_is_left_unchanged():
 def test_location_must_be_known():
     with pytest.raises(ValueError):
         stamp_iphone_capture(_jpeg(), location="Melbourne")
+
+
+def _png_text(key: str, value: str) -> bytes:
+    return _png_chunk(b"tEXt", f"{key}\x00{value}".encode("ascii"))
+
+
+def _png_with_credit(*, artist: str = "Old Name", copyright_: str = "Old Name") -> bytes:
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    return (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_text("Artist", artist)
+        + _png_text("Copyright", copyright_)
+        + _png_chunk(b"tEXt", b"Comment\x00c2pa test contentcredentials")
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00"))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
+def test_set_credit_tags_roundtrip():
+    stamped, report = stamp_iphone_capture(
+        _png(),
+        location=UNKNOWN,
+        taken_at=TAKEN,
+        tags={"Artist": "Lain Cashmere", "Copyright": "Lain Cashmere"},
+    )
+    assert report["tags"] == {"Artist": "Lain Cashmere", "Copyright": "Lain Cashmere"}
+    assert read_credit_tags(stamped) == report["tags"]
+
+
+def test_keep_credit_tags_and_explicit_override():
+    original = _png_with_credit()
+    assert read_credit_tags(original) == {"Artist": "Old Name", "Copyright": "Old Name"}
+    kept = resolve_credit_tags(original, keep=["Copyright", "Artist"])
+    assert kept == {"Artist": "Old Name", "Copyright": "Old Name"}
+    replaced = resolve_credit_tags(
+        original,
+        keep=["Artist", "Copyright"],
+        set_tags={"Copyright": "Lain Cashmere"},
+    )
+    assert replaced == {"Artist": "Old Name", "Copyright": "Lain Cashmere"}
+    stripped = _png()
+    stamped, _report = stamp_iphone_capture(
+        stripped, location=UNKNOWN, taken_at=TAKEN, tags=replaced
+    )
+    assert b"c2pa" not in stamped.lower()
+    assert read_credit_tags(stamped) == replaced
+
+
+def test_png_author_keyword_is_kept_as_artist():
+    sig = b"\x89PNG\r\n\x1a\n"
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    original = (
+        sig
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_text("Author", "Lain Cashmere")
+        + _png_chunk(b"IDAT", zlib.compress(b"\x00\x00\x00"))
+        + _png_chunk(b"IEND", b"")
+    )
+    assert resolve_credit_tags(original, keep=["Artist"]) == {"Artist": "Lain Cashmere"}
+
+
+def test_unknown_credit_tag_rejected():
+    with pytest.raises(ValueError):
+        resolve_credit_tags(b"", set_tags={"Software": "Lain Cashmere"})
+
+
+def test_clean_image_cli_keeps_and_sets_credit(tmp_path, monkeypatch):
+    src = tmp_path / "shot.png"
+    src.write_bytes(_png_with_credit())
+    dest = tmp_path / "shot.cleaned.png"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "clean_image.py",
+            str(src),
+            "-o",
+            str(dest),
+            "--keep-tag",
+            "Artist",
+            "--tag",
+            "Copyright=Lain Cashmere",
+        ],
+    )
+    assert clean_image.main() == 0
+    data = dest.read_bytes()
+    assert b"c2pa" not in data.lower()
+    assert read_credit_tags(data) == {"Artist": "Old Name", "Copyright": "Lain Cashmere"}

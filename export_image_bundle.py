@@ -13,7 +13,9 @@ needs Python 3.10+ and nothing else: no HTTP service, no Docker, no pip
 installs. It strips metadata and does not rewrite pixels. After the strip,
 `clean_image.py` stamps JPEG, PNG, and WebP in-process (HEIC, AVIF, and TIFF
 when exiftool is installed) as an Apple iPhone 17 Pro Max capture, with the
-location set to Sydney CBD, NSW or left unknown.
+location set to Sydney CBD, NSW or left unknown. `--keep-tag` copies Artist or
+Copyright off the input, and `--tag Name=Value` sets either one (for example
+`--tag 'Copyright=Lain Cashmere'`).
 
 Re-run after pulling to refresh the copy. The script only writes the files it
 lists; anything else in DEST is left alone. It exits 1 without writing when a
@@ -118,7 +120,8 @@ def build(dest: Path) -> dict[str, object]:
         "built": datetime.now(UTC).strftime("%Y-%m-%d"),
         "scope": (
             "image metadata strip (C2PA / EXIF / XMP / AI metadata), then an "
-            "iPhone 17 Pro Max capture stamp (Sydney CBD, NSW or unknown)"
+            "iPhone 17 Pro Max capture stamp (Sydney CBD, NSW or unknown); "
+            "optional Artist/Copyright keep or set"
         ),
         "files": {name: sha256(dest / name) for name in sources},
     }

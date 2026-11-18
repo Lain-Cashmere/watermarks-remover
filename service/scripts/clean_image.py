@@ -3,6 +3,7 @@
 
 JPEG, PNG, and WebP are stamped in-process. HEIC, AVIF, and TIFF are stamped
 when exiftool is installed. The location is Sydney CBD, NSW or unknown.
+Artist and Copyright can be copied from the input or set explicitly.
 """
 
 from __future__ import annotations
@@ -16,14 +17,30 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from common import backup_path, cleaned_path, eprint
 from image_meta import clean_image
-from iphone_capture import stamp_iphone_capture
+from iphone_capture import CREDIT_TAGS, resolve_credit_tags, stamp_iphone_capture
 
 
-def _apply_capture_stamp(dest: Path, src: Path, result: dict) -> None:
+def _cli_tags(items: list[str]) -> dict[str, str]:
+    tags: dict[str, str] = {}
+    for item in items:
+        name, sep, value = item.partition("=")
+        if not sep:
+            raise ValueError(f"tag must be Name=Value, got {item!r}")
+        tags[name] = value
+    return tags
+
+
+def _apply_capture_stamp(
+    dest: Path,
+    src: Path,
+    result: dict,
+    *,
+    tags: dict[str, str] | None = None,
+) -> None:
     """Write the same iPhone capture tags /clean appends, after the strip."""
     if not dest.is_file():
         return
-    stamped, capture = stamp_iphone_capture(dest.read_bytes())
+    stamped, capture = stamp_iphone_capture(dest.read_bytes(), tags=tags)
     if capture["written"]:
         dest.write_bytes(stamped)
     result.setdefault("actions", []).append(capture["action"])
@@ -34,6 +51,7 @@ def _apply_capture_stamp(dest: Path, src: Path, result: dict) -> None:
         "software": capture["software"],
         "location": capture["location"],
         "taken_at": capture["taken_at"],
+        "tags": capture["tags"],
     }
     result["bytes_out"] = dest.stat().st_size
     # In-place with an existing backup reads and writes the same path, so the
@@ -57,6 +75,21 @@ def main() -> int:
         "--keep-non-ai-metadata",
         action="store_true",
         help="Only drop segments/chunks that look like C2PA/AI (less aggressive)",
+    )
+    p.add_argument(
+        "--keep-tag",
+        action="append",
+        default=[],
+        choices=tuple(CREDIT_TAGS),
+        help="Copy Artist or Copyright from the input onto the cleaned file",
+    )
+    p.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="Set Artist or Copyright, overriding --keep-tag. "
+        "Example: --tag 'Copyright=Lain Cashmere'",
     )
     p.add_argument("--json", action="store_true", help="JSON result on stdout")
     p.add_argument(
@@ -170,6 +203,16 @@ def main() -> int:
         dest = args.output or cleaned_path(args.path)
 
     try:
+        credit_tags = resolve_credit_tags(
+            src.read_bytes(),
+            keep=args.keep_tag,
+            set_tags=_cli_tags(args.tag),
+        )
+    except ValueError as exc:
+        eprint(f"error: {exc}")
+        return 2
+
+    try:
         result = clean_image(
             src,
             dest,
@@ -190,7 +233,7 @@ def main() -> int:
             markdiffusion_device=args.markdiffusion_device,
             markdiffusion_timeout=args.markdiffusion_timeout,
         )
-        _apply_capture_stamp(dest, src, result)
+        _apply_capture_stamp(dest, src, result, tags=credit_tags)
     except Exception as e:
         eprint(f"error: {e}")
         return 1
