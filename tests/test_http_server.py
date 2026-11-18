@@ -20,6 +20,7 @@ SCRIPTS = ROOT / "service" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import container_meta
+import iphone_capture
 import server
 
 
@@ -210,6 +211,17 @@ def test_clean_png_strips_metadata(conn):
     assert b"c2pa" not in cleaned.lower()
     assert body["report"]["format"] == "png"
     assert any("tEXt" in a for a in body["report"]["actions"]) or "actions" in body["report"]
+    capture = body["report"]["capture"]
+    assert capture["written"] is True
+    assert capture["make"] == "Apple"
+    assert capture["model"] == "iPhone 17 Pro Max"
+    assert capture["location"] in {"Sydney CBD, NSW", "unknown"}
+    assert any("iPhone 17 Pro Max" in action for action in body["report"]["actions"])
+    stamped = iphone_capture.read_stamped_capture(cleaned)
+    assert stamped is not None
+    assert stamped["make"] == "Apple"
+    assert stamped["model"] == "iPhone 17 Pro Max"
+    assert stamped["location"] == capture["location"]
 
 
 def test_clean_markdown_container(conn):

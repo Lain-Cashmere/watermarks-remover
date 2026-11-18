@@ -78,6 +78,7 @@ from container_meta import (
 )
 from format_dispatch import classify_bytes
 from image_meta import clean_image, inspect_image, run_synthid_score, synthid_is_watermarked
+from iphone_capture import stamp_iphone_capture
 from score_stylometry import score_text_stylometry
 from text_detectors import detector_status, run_all_text_detectors, run_text_detectors
 from text_unicode import clean_text, inspect_text
@@ -563,7 +564,11 @@ _OPENAPI_PATHS: dict[str, dict[str, Any]] = {
     },
     "/clean": {
         "post": {
-            "summary": "Clean a file; returns the cleaned bytes and an actions/stats report",
+            "summary": (
+                "Clean a file and return the cleaned bytes plus an actions report. "
+                "Image output is stamped as an Apple iPhone 17 Pro Max capture, "
+                "with the location set to Sydney CBD, NSW or left unknown."
+            ),
             "requestBody": _schema(
                 required=True,
                 content={"application/json": _schema(schema=_clean_request_schema())},
@@ -1290,6 +1295,22 @@ def _clean_payload(data: bytes, name: str, options: dict[str, Any]) -> dict[str,
                 strip_all_metadata=strip_all,
                 remove_pixel=remove_pixel,
             )
+            # Stamp after the strip (and any pixel pass) so the capture tags
+            # are the metadata that leaves /clean.
+            stamped, capture = stamp_iphone_capture(dest.read_bytes())
+            if capture["written"]:
+                dest.write_bytes(stamped)
+            result["actions"].append(capture["action"])
+            result["capture"] = {
+                "written": capture["written"],
+                "make": capture["make"],
+                "model": capture["model"],
+                "software": capture["software"],
+                "location": capture["location"],
+                "taken_at": capture["taken_at"],
+            }
+            result["bytes_out"] = dest.stat().st_size
+            result["changed"] = dest.read_bytes() != data
             if bool(options.get("detect_before")) and result.get("synthid_before") is None:
                 result["synthid_before"] = run_synthid_score(src)
             if bool(options.get("detect_after")) and result.get("synthid_after") is None:

@@ -31,6 +31,7 @@
 !/compose-check.sh
 !/compose.yaml
 !/CONTRIBUTING.md
+!/export_image_bundle.py
 !/LICENSE
 !/Makefile
 !/pytest.ini
